@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <zlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "osmaccess.h"
 //#include "./osmformat.pb-c.h"
@@ -296,7 +297,7 @@ double int2deg(int32_t granularity, int64_t in) {
   return 1.0;//(in*granularity) / (double)10 ** 9;
 }
 
-/** TODO: actually do something and unpack data.
+/** TODO: actually do something and unpack data. (For testing purposes only.
  */
 void unpack_osmblob(Blob* bp) { //OSMPBF__Blob* osm_blob, char* const type) {
   char* const type = bp->bh->type;
@@ -454,12 +455,62 @@ void unpack_osmblob(Blob* bp) { //OSMPBF__Blob* osm_blob, char* const type) {
 }
 
 
+/** Unpack Data Blob, provides new allocated PrimitiveBlock
+ */
 
+int unpack_data_blob(Blob* blob, OSMPBF__PrimitiveBlock** primblockp){
+
+  char* const type = blob->bh->type;
+  if(strncmp("OSMData", type, 7))
+    return -1;
+  OSMPBF__Blob* osm_blob = bp->b; 
+  assert(osm_blob);
+  uint8_t* zd = 0;
+  long len = 0;
+  int must_free = 0;
+  if(osm_blob->has_raw){
+    zd = (uint8_t*)osm_blob->raw;
+    // FIXME len?
+  } else  if(osm_blob->has_lzma_data){
+    // TODO
+  } else
+    
+    // unpack zlib_data
+    if(osm_blob->has_zlib_data){
+      assert(osm_blob->has_raw_size);
+      zd = malloc(osm_blob->raw_size + 1);
+      must_free = 1;
+      zd[osm_blob->raw_size] = 0;
+      len = unpack_zlib_data(zd, osm_blob->raw_size,  osm_blob->zlib_data.data, osm_blob->zlib_data.len);
+    }  
+  
+  OSMPBF__PrimitiveBlock* pb = osmpbf__primitive_block__unpack(0, len, zd);
+  if(pb) {
+    // FIXME mist memcpy primitive block?
+    *primblockp = pb;
+  }
+  if(must_free)
+    free(zd);
+    
+  return 0;
+}
 
 
 
 ///// Filtering //////////////////////////////////////////////////////////////iii
 
+typedef struct filter {
+  int* stack;
+  size_t stacksize;
+  int* sp; // stack pointer to last non-empty entry
+  int* s_op; // stack pointer to last op
+
+  filterop* cond;
+  filterop* cp;
+
+} filter;
+
+double global_stack_size_factor = 2.0;
 
 /** Copy filter operations.
  */
@@ -484,93 +535,153 @@ filter* newFilterInit(filterop* fa) {
   for(filterop* p_end = fa; p_end && p_end->type != END; p_end++)
     maxStackSize ++;
   f->cond = malloc(maxStackSize * sizeof(filterop));
-  f->stack = malloc(maxStackSize * sizeof(int));
+  f->stacksize = rint(maxStackSize * sizeof(int) * global_stack_size_factor);
+  f->stack = malloc(f->stacksize);
   for(filterop* p_end = fa, f->cp = f->cond; p_end && p_end->type != END; p_end++, p->cp++)
     filter_cp_op(p->cp, p_end);
+ }
+
+
+filter* filter_upsize_stack(filter* f){
+  // TODO resize the filter, increment global stack size factor
+  global_stack_size_factor += 0.5;
+  int* tmp = realloc(f->stack, f->stacksize * sizeof(int) * global_stack_size_factor);
+  if(tmp != 0) 
+    f->stack = tmp;
+  else
+    // TODO set errno, write error
+    return 0;
+  return f;
+}
+
+
+filter* filter_reset(filter* f) {
+  f->sp = f->stack;
+  f->cp = f->cond;
 }
 
 
 
-/** Apply filter to OSM Data, generate List of matching nodes.
+/** Execute filter on included OSM Blob.
+ * @param f a new filter
+ * @param blob the blob containing an osm data blob to filter for
+ * @param handler function pointer of type void (*handler)(void* user_data, enum elem_type, void* element); where user data is exactly the parameter data as given below
+ * @param data pointer to user data, is provided to the handler
  */
-Node* f_match_nodes(filter* f, Blob* b) {
-  //int* stack;
-  //int* sp;
-
-  //filterop* op;
-  //filterop* p;
-  
-
-  while(1)
-    if(p && *p > 0) { // fixme not usable
-      switch (p->type) {
-      case OPnot:
-	op_left = 1;
-	// push(OPnot)
-	break;
-      case OPand:
-	op_left = 2;
-	// if fp+1 == 0 return
-	// else if fp+2 ==0 return
-	// else up one
-      case OPor:
-	op_left = 2;
-	
-      case CondKV:
-	op_left = 0;
-      case CondKVre:
-	op_left = 0;
-     default:
+int findAllElements_ar(filter* f, Blob* blob, void (*handler)(void* data, enum elem_type ,void* ), void* data) {
+  int n_found = 0;
+  if(strcmp("OSMData", blob->bh->type))
+    return -1; // Blob is no data blob
+  OSMPBF__PrimitiveBlock* pb = 0;
+  if(0 > unpack_data_blob(blob, &pb)) {
+    if(pb) free(pb);
+    return -2; // Error unpacking blob
+  }
+  if(pb) {
+    int i = 0;
+    for(; i < pb->n_primitivegroup; i++) {
+      OSMPBF__PrimitiveGroup* pg = pb->primitivegroup[i];
+      if(pg->n_nodes > 0) {
+	assert(pg->nodes != 0);
+	for(int n = 0; n < pg->n_nodes; n++) {
+	  filter_reset(f);
+	  if(!filter_node(f, pg->nodes[n])) {
+	    handler(data, node, pg->nodes[n])
+	  } 
+	}
       }
-    } else if(sp > stack) {
-      //op = pop(sp);
-      switch(op) {
-      case OPnot: 
-	res = ! res
-      case OPand:
-	// FIXME determine how many operands have been read
-      case OPor:
-	// FIXME determine how many operands have been read
+      if(pg->dense) {
+	OSMPBF__DenseNodes *dn = pg->dense;
+	for(int j=0; j < dn->n_lat && j < dn->n_lon; j++) {
+	  // TODO filter dense node  
+	}
+	
+      }
+      if(pg->n_relations > 0 && pg->relations ) {
+	int r;
+	for(r = 0; r < pg->n_relations; r++) {
+	  OSMPBF__Relation* rel = pg->relations[r];
+	  // TODO filter relation
+	}
+      }
+      if(pg->n_ways > 0 && pg->ways) {
+	int w;
+	for(w = 0; w < pg->n_ways; w++) {
+	  OSMPBF__Way* way = pg->ways[w];
+	  // TODO filter way
+	}
       }
     }
-  
-
-  return 0;
+  }
 }
 
 
 
-void findAllElements_ar(filter* f, void (*handler)(void* data, void* element), void* data) {
-  int res = 0;
-  int op_left = 1; //number of op left to parse
-  filterop* fp = fa;
 
-  filterop* stack; // stack for operations that are not yet determined
-  filterop* sp; // stack pointer
-
+/** Return 0 if the filter is true when applied to node.
+ */
+int filter_node(filter* f, OSMPBF__Node* node) {
+  //stack layout:  prevOP pic pointer | OP | OPnum | results.... | prevOP pic pointer | OP2 | OPnum | results |....
   
-  while(1)
-    if(op_left > 0) { // fixme not usable
-      switch (fp->type) {
-      case OPnot:
-	op_left = 1;
-	// push(OPnot)
-	break;
-      case OPand:
-	op_left = 2;
-	// if fp+1 == 0 return
-	// else if fp+2 ==0 return
-	// else up one
-      case OPor:
-	op_left = 2;
-	
-      case CondKV:
-	op_left = 0;
-      case CondKVre:
-	op_left = 0;
-     default:
+  // stackpointer always points to the last free entry
+ 
+
+  void stack_push_op(int op, int opnum) {
+    if(f->sp + 3 - f->stack >= f->stacksize)
+      filter_upsize_stack(f);
+    f->sp[0] = f->sp - f->sop;
+    f->sp[1] = op;
+    f->sp[2] = opnum;
+    f->sp += 3;
+  }
+
+  void stack_push_res(int res) {
+    if(f->sp + 1 - f->stack >= f->stacksize)
+      filter_upsize_stack(f);
+    f->sp[0] = res;
+    f->sp += 1;
+  }
+  
+  int evalKV(){
+    return TRUE;
+  }
+
+  int evalKVre(){
+    return TRUE;
+  }
+
+  int evalType() {
+    return TRUE;
+  }
+
+  while(*(f->cp->type) != END)
+    // eval Condition
+    switch (f->cp->type) {
+    case OPnot:
+      stack_push(OPnot, 1);
+      break;
+    case OPand:
+      stack_push(OPand, 2);
+      break;
+    case OPor:
+      stack_push(OPor, 2);
+      break;
+    case CondKV:
+      stack_push_res(evalKV());
+      break;
+    case CondKVre:
+      stack_push_res(evalKVre());
+      break;
+    case CondType:
+      stack_push_res(evalType());
+      break;
+    default:
+      // NOP
       }
-    } else if(sp > stack) {
+    } 
+
+// eval stack
+else if(sp > stack) {
       //op = pop(sp);
       switch(op) {
       case OPnot: 

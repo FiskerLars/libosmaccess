@@ -36,7 +36,6 @@ void unpack_osmblob(Blob* blob);
 
 
 
-
 /** key value condition */
 typedef struct kvCondition {
   char* key;
@@ -48,8 +47,17 @@ typedef struct kvReCondition {
   regex_t* val;
 } kvReCondition;
 
+/** element type, provided to callback handler, called by filter. */
+enum elem_type {node, dense_node, way, relation};
+
+/** Conditions on types are defined thus.*/
 enum typeCondition {node, way, relation};
 
+/** Operations:
+ * Boolian: and, or, not
+ * Conditional: key-value, regexp on key-value, type condition
+ * Controls: no-operation, end-of-string
+ */
 enum optype {OPand, OPor, OPnot, CondKV, CondKVre, CondType, NOP, END };
 
 /** operation or operand for filtering osm elements.
@@ -66,16 +74,6 @@ typedef struct filterop {
 
 
 
-typedef struct filter {
-  int* stack;
-  int* sp;
-
-  filterop* cond;
-  filterop* cp;
-
-} filter;
-
-filter* newFilterInit(filterop* fa);
 
 /** Find all elements that adhere to the conditions in the filter description fa.
  * @param fa condition for elements, in reverse polish notation
